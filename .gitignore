@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Test / tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Runtime output ---
+# Everything a run writes lives under var/ (CONDUIT_HOME). Never tracked.
+var/
+*.log
+
+# --- Local-profile databases ---
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Generated corpora and rasters ---
+# bench/make_corpus.py is source; synthetic_corpus.pdf and its manifest are its
+# output and are reproducible from it. Same for any tile or page raster.
+bench/out/
+# Plan sets are input data, never repo content (real ones are also customer data).
+*.pdf
+*.webp
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+
+# --- Editor / OS ---
+.idea/
+.vscode/
+.DS_Store
