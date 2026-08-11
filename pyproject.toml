@@ -1,0 +1,48 @@
+[project]
+name = "conduit"
+version = "0.1.0"
+description = "Conduit Takeoff — auditable MEP quantity takeoff from construction PDF plan sets"
+requires-python = ">=3.11"
+# Local (low-footprint) profile dependencies only. The production profile adds
+# psycopg[binary], boto3, arq, fastapi — see conduit/PROFILES.md.
+dependencies = [
+    "pydantic>=2.7",
+    "SQLAlchemy>=2.0",
+    "alembic>=1.13",
+    "pymupdf>=1.24",   # AGPL — isolated behind conduit.pdf.backend.PdfBackend (risk R9)
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+# pytest-xdist is deliberately NOT a default dependency: on the current machine
+# /home is a 300 MB volume, so plain `pytest` is the default. Cap at `-n 2` if
+# xdist is ever installed (02-tech-stack.md hardware notes).
+parallel = ["pytest-xdist>=3"]
+postgres = ["psycopg[binary]>=3.1"]
+s3 = ["boto3>=1.34"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["conduit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# NOTE: do not add `-n auto`. Max concurrency on this hardware is `-n 2`.
+filterwarnings = ["error::DeprecationWarning:conduit.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# The two files copied verbatim from the design package are excluded from lint:
+# they are the source of truth and must not be reformatted (roadmap W1 task 2).
+extend-exclude = ["conduit/db/models.py", "conduit/schemas.py", "alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
