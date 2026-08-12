@@ -36,8 +36,13 @@ Therefore:
 * A factored quantity is **labelled `factored` in `Notes / Location`**, with the
   factor and its source, on the line the estimator reads.
 * A factored quantity's stored "evidence" is the *line it was factored from*
-  plus the rule — which the schema cannot currently express (`output-schema.md`
-  §6, items 2–4).
+  plus the rule, and the schema now expresses exactly that: a
+  `TakeoffLineEvidence` row of kind `derived_from_line` pointing at the source
+  line, alongside `TakeoffLine.derivation = factored` and the
+  `factor_rule_id` / `factor_rule_version` / `factor_value` columns
+  (`output-schema.md` §6.1, items 2–4). `ck_evidence_exactly_one` was widened
+  from five shapes to six, not loosened: a line with no evidence at all is
+  still refused.
 * Where a rule can be geometric, **it is geometric**. A per-foot fitting factor
   is not shipped as a default. It exists only as an explicit fallback, §6.
 
@@ -340,7 +345,7 @@ where topology could not be built. When used it is:
   into 90s and tees**, because splitting a factor by type invents a type
   distribution nobody measured.
 
-### 6.4 Insulation → `INSULATION`, **measured if the schema allows, factored if not**
+### 6.4 Insulation → `INSULATION`, **measurable now that the schema allows it**
 
 The workbook: `Insulation – 1/2" wall fiberglass w/ ASJ (hot water) … 380 LF …
 Hot water only`.
@@ -349,13 +354,21 @@ The rule is simple — insulation LF = the LF of the runs it applies to — and 
 is *measurable* with real provenance, inheriting the `Measurement` rows of the
 insulated runs. Except:
 
-> **`SystemType` cannot currently express "hot".** It has
-> `PIPE_DOMESTIC_WATER` and no hot/cold/recirculation distinction. Until that
-> is fixed (`output-schema.md` §6, item 7), insulation cannot be derived by
-> rule at all — only factored off a proportion of domestic water LF, which is
-> a guess with no coordinate. **The schema change is what turns this quantity
-> from factored into measured**, which is a good illustration of why the list
-> in §6 of the output schema is not cosmetic.
+> **`SystemType` can now express "hot".** It gained `PIPE_DOMESTIC_HOT`,
+> `PIPE_DOMESTIC_COLD` and `PIPE_DOMESTIC_RECIRC` (`output-schema.md` §6.1,
+> item 7), so the insulated runs can be selected and insulation LF inherits
+> their `Measurement` rows instead of being factored off a proportion of
+> domestic-water LF — a guess with no coordinate. **That schema change is what
+> moves this quantity from factored to measured**, which is the direction we
+> always want to move.
+>
+> Two caveats, both real. `PIPE_DOMESTIC_WATER` survives as the honest value
+> for a run whose service was **not** determined; those runs cannot carry
+> insulation by rule and must not be silently treated as cold. And whether the
+> pipeline can actually read the service off a drawing — from a `HW`/`CW`
+> service code, a layer, or a line style — is **unmeasured**, because no real
+> plan set exists (R10). The schema no longer blocks it; that is the whole of
+> what changed here.
 
 Insulation of fittings and valves (an adder per fitting) is a **factor** in all
 cases.

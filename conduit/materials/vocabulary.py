@@ -476,8 +476,8 @@ def item_key(
     ``P|ELBOW_90|COPPER_WROT|0.5IN``. Note the material component: two
     identically-shaped fittings in different materials are different line
     items and different pricebook rows, so material is part of the key.
-    ``TakeoffLine.aggregation_key`` does **not** carry material today — see
-    ``docs/output-schema.md`` §6.
+    ``aggregation_key()`` below is this key plus a scope, and that is what
+    ``TakeoffLine.aggregation_key`` stores.
     """
     return "|".join(
         (
@@ -486,6 +486,47 @@ def item_key(
             material.code if material is not None else "-",
             (size.key if size is not None and size.key else "-"),
         )
+    )
+
+
+#: The default scope component: the line rolls up the whole plan set.
+DOC_SCOPE = "doc"
+
+
+def sheet_scope(sheet_number: str) -> str:
+    """The per-sheet scope component, for classes that must not roll up.
+
+    Used for enlarged/partial plans and for anything on a sheet flagged as a
+    possible double-count (``03-pipeline-specs.md`` §5.2).
+    """
+    return f"sheet:{sheet_number}"
+
+
+def aggregation_key(
+    item_type: ItemType,
+    *,
+    discipline: Discipline,
+    material: Material | None = None,
+    size: Size | None = None,
+    scope: str = DOC_SCOPE,
+) -> str:
+    """``TakeoffLine.aggregation_key`` — the grouping identity for a line.
+
+    ``item_key()`` plus a scope: ``P|ELBOW_90|COPPER_WROT|0.5IN|doc``.
+
+    **Material is a component, and that is a correctness property, not a
+    nicety.** Without it ``1/2" copper 90`` and ``1/2" PVC 90`` share a key,
+    sum into a single total, and the estimator sees one plausible-looking
+    number with no symptom of the merge. Items with no material take ``-``, so
+    the key is always five fields wide and a missing material can never shift
+    the meaning of a later field.
+
+    The size component is ``Size.key``, not ``Size.display`` — the same
+    normalised form stage A produces, so the key is stable against how the
+    size happened to be written on the drawing.
+    """
+    return "|".join(
+        (item_key(item_type, discipline=discipline, material=material, size=size), scope)
     )
 
 

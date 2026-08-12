@@ -56,6 +56,14 @@ thing someone assumes works.
 9. **Everything about accuracy.** There are no real plan sets (risk R10). The
    only test input is the synthetic corpus — see `bench/CORPUS.md`.
 
+10. **Batch (table-rebuild) migrations on Postgres.** Migration
+    `8b41d7c05a92` replaces two CHECK constraints on `takeoff_line_evidence`
+    inside `op.batch_alter_table`. On SQLite that is a table rebuild, and it is
+    what the round-trip test exercises; on Postgres the same code emits plain
+    `ALTER TABLE … DROP/ADD CONSTRAINT`, which has never run here. The
+    rebuild-versus-ALTER difference also means the SQLite run says nothing
+    about how long the change takes on a populated table.
+
 ## Moving to the production profile
 
 ```bash

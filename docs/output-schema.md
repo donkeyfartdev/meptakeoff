@@ -287,13 +287,16 @@ Export row  (Item | Description | Size/Spec | Material | Qty | Unit | Notes)
    │  one row per current TakeoffLine
    ▼
 TakeoffLine                      (is_current = true, pipeline_run_id = R)
-   │  .quantity, .uom, .item_class, .size_label, .discipline
+   │  .quantity, .uom, .item_class, .material_code, .size_label, .discipline
    │  .aggregation_key           ← the stable identity across runs
+   │  .derivation                ← counted|measured|derived_geometric|
+   │                               factored|manual — read by the estimator
+   │  .factor_rule_id, .factor_rule_version, .factor_value, .factor_basis
    │  .contributing_sheet_numbers ← denormalised, feeds Notes / Location
    │
    │  1..N   (evidence_count, and ck_line_requires_evidence forbids zero)
    ▼
-TakeoffLineEvidence              (exactly one of five *_id set)
+TakeoffLineEvidence              (exactly one of six *_id set)
    │  .contribution_qty          ← Σ contributions == TakeoffLine.quantity
    │  .sheet_id, .page_number, .coordinate_space, .bbox_*   (denormalised)
    │  .extractor_version, .confidence
@@ -311,6 +314,9 @@ TakeoffLineEvidence              (exactly one of five *_id set)
    │                           .tile_origin_x/y, .tile_size_px  (exact crop)
    ├── schedule_row_id ────► ScheduleRow ─► ScheduleTable  (bbox, extractor)
    ├── text_span_id ───────► TextSpan     (bbox in pdf_points, .role, .source)
+   ├── source_takeoff_line_id ─► TakeoffLine   (a factored quantity's basis;
+   │                              the cited line has its own evidence, so the
+   │                              chain continues rather than stopping here)
    └── review_action_id ───► ReviewAction (actor, before/after, reason)
                                  │
                                  ▼
@@ -350,57 +356,82 @@ per_sheet  = GROUP BY TakeoffLineEvidence.sheet_id
              → SUM(contribution_qty)  per sheet
 locator    = per-sheet split when len(sheets) > 1
              else grid ref if available, else bbox centre in sheet coords
-derivation = 'counted' | 'measured' | 'derived: <rule>' | 'factored: <rule>'
+derivation = schemas.derivation_label(line.derivation,
+                                     factor_rule_id=…, factor_rule_version=…)
+             → 'counted' | 'measured' | 'derived: geometry'
+             | 'factored: hanger_spacing v1' | 'entered by reviewer'
 ```
 
-`derivation` is the one part of this string that has no home in the schema
-today. See §6.
+`derivation` now has a home in the schema — `TakeoffLine.derivation` plus the
+factor columns (§6.1) — and the label is generated from those columns rather
+than written by a caller who might forget. A factored quantity therefore says
+so in the column the estimator actually reads, which was the point.
 
 ---
 
 ## 5. Aggregation identity
 
-`TakeoffLine.aggregation_key` is the deterministic grouping identity, currently
-specified (`03-pipeline-specs.md` §5.2) as:
+`TakeoffLine.aggregation_key` is the deterministic grouping identity
+(`03-pipeline-specs.md` §5.2):
 
 ```
-{discipline}|{item_class}|{size_label}|{scope}
+{discipline}|{item_class}|{material}|{size_label}|{scope}
+
+P|ELBOW_90|COPPER_WROT|0.5IN|doc
+P|ELBOW_90|PVC_SCH40|0.5IN|doc
+P|HANGER|-|-|doc
 ```
 
-The vocabulary supplies `item_class` (= `ItemType.code`) and `size_label`
-(= `Size.display`), and `conduit.materials.item_key()` produces the
-vocabulary's own key:
+Built by `conduit.materials.aggregation_key()`, which is
+`conduit.materials.item_key()` plus a scope (`doc`, or `sheet:<sheet_number>`)
+— one definition, so the vocabulary's key and the stored key cannot diverge.
+The components: `item_class` = `ItemType.code`, `material` = `Material.code`,
+and the size component is **`Size.key`**, the normalised form, not
+`Size.display`. `Size.key` is *defined* as `normalize_text(Size.display)`
+(§2.1), so this is a lossless canonicalisation of the `Size / Spec` column, and
+the key does not change with how the size happened to be written on a drawing.
 
-```
-P|ELBOW_90|COPPER_WROT|0.5IN
-```
-
-Note the third component. **Material is missing from `aggregation_key` and from
-`TakeoffLine` entirely** — `1/2" copper 90` and `1/2" PVC 90` would collide on
-one key and one total. That is a correctness defect, not a nicety, and it is
-the first item in §6.
+**Material is part of the identity, and that is a correctness property.**
+Without it the first two keys above are one key: `1/2" copper 90` and
+`1/2" PVC 90` sum into one line, one total, and nothing in the export shows
+that it happened. An item with no material takes `-`, so the key is always
+five fields wide and a missing component can never shift the meaning of a
+later one. Tested in `tests/test_takeoff_line_identity.py`, including a
+regression assertion stated as the old, material-blind behaviour.
 
 ---
 
-## 6. Columns this schema needs that do not exist yet
+## 6. Schema gaps — what landed, and what is still missing
 
-Per the brief, **nothing is added in this PR.** This is the list, in the order
-I would land it, each with the reason it is not optional.
+This was a nine-item list. **Five of the nine are now built** — migration
+`8b41d7c05a92`, `alembic/versions/20260812_1500_line_identity_and_derivation.py`.
+The original numbering is kept below so a reference to "§6 item 8" still means
+what it meant.
+
+### 6.1 Landed
+
+| # | What was built | Note |
+|---|---|---|
+| 1 | `TakeoffLine.material_code String(64)` (nullable); `aggregation_key` is now `{discipline}\|{item_class}\|{material}\|{size_label}\|{scope}`, built by `conduit.materials.aggregation_key()` | §5. The size component is `Size.key`, not `Size.display`. |
+| 2 | `TakeoffLine.derivation` — `Derivation` enum, `counted` / `measured` / `derived_geometric` / `factored` / `manual`, NOT NULL, default `counted` | Rendered for the estimator by `schemas.derivation_label()` → `factored: hanger_spacing v1`. Still distinct from `status`, which stays a review lifecycle. |
+| 3 | `TakeoffLine.factor_rule_id`, `factor_rule_version`, `factor_value Numeric(18,6)`, `factor_basis` JSON | The rule, its version and the multiplier are **columns**, not JSON keys, because "which lines used `hanger_spacing v1`" is a query a reviewer runs the day a rule turns out to be wrong (`AGENTS.md` §5). `factor_basis` holds the remaining parameters only. `ck_line_factored_carries_factor` requires all three of a line that claims `derivation = factored`. |
+| 4 | `TakeoffLineEvidence.source_takeoff_line_id` FK (RESTRICT) + `EvidenceKind.DERIVED_FROM_LINE` | `ck_evidence_exactly_one` was **extended, not relaxed**: exactly one of six rather than exactly one of five. Evidence still cannot be absent, and `ck_line_requires_evidence` is untouched — a factored line satisfies it by having a real evidence row that cites its basis. `ck_evidence_no_self_basis` forbids a line citing itself. |
+| 7 | `SystemType` gained `PIPE_DOMESTIC_COLD` / `PIPE_DOMESTIC_HOT` / `PIPE_DOMESTIC_RECIRC` | No DDL: the enum is a `native_enum=False` VARCHAR. `PIPE_DOMESTIC_WATER` is **kept and is not a synonym for cold** — it is the value for a run whose service was not determined, and guessing cold would put insulation on the wrong runs. |
+
+Items 2, 3 and 4 were one defect described three ways: a factored quantity was
+unstorable *and* unlabelled. They had to land together or not at all.
+
+### 6.2 Still outstanding
 
 | # | Where | What | Why |
 |---|---|---|---|
-| 1 | `TakeoffLine` | `material_code String(64)` (nullable), and `aggregation_key` extended to `{discipline}\|{item_class}\|{material}\|{size_label}\|{scope}` | Without it, copper and PVC fittings of the same size and shape merge into one line and one total. Silently. This is the single most dangerous gap in the schema today. |
-| 2 | `TakeoffLine` | `derivation` enum: `counted` / `measured` / `derived_geometric` / `factored` / `manual` | "A factored quantity must be labelled as such in the output rather than presented as a counted one." There is nowhere to put that label. `status` is a review lifecycle, not a derivation. |
-| 3 | `TakeoffLine` | `factor_basis JSONB` (nullable) — `{"rule":"hanger_spacing","spacing_ft":7.0,"source_line_id":"…","source":"project default"}` | A factored number must carry the factor that produced it and the quantity it was factored *from*, or it cannot be checked or re-derived. |
-| 4 | `TakeoffLineEvidence` | `source_takeoff_line_id` FK + a new `EvidenceKind` member, `"derived_from_line"` | A factored line's "evidence" is another line (hangers from pipe LF). `ck_evidence_exactly_one` currently forbids expressing that, so a factored line has no legal evidence row at all and `ck_line_requires_evidence` rejects it. **These two constraints make factored lines unstorable today.** |
 | 5 | new table | `derived_fitting` — immutable, run-scoped: `sheet_id`, `page_number`, `point_x/point_y` (pdf_points), `vertex_index`, `source_measurement_id`, `rule_id`, `tolerance_used`, `item_type_code`, `confidence`, `extractor_version` | A geometry-derived elbow *has a coordinate*. It deserves a real evidence row of its own rather than being smuggled into a note. Plus a new `EvidenceKind` member, `"derived_fitting"`, and an FK on `TakeoffLineEvidence`. See `docs/derived-quantities.md` §3. |
-| 6 | `UnitOfMeasure` | `LUMP_SUM = "LS"` | The enum has `LOT`; every estimator spreadsheet writes `LS`. §1.5. |
-| 7 | `SystemType` | split `PIPE_DOMESTIC_WATER` into `PIPE_DOMESTIC_COLD` / `PIPE_DOMESTIC_HOT` / `PIPE_DOMESTIC_RECIRC` (or add a `service` column on `Measurement`) | Insulation is on hot-water lines only. Today the schema cannot distinguish hot from cold, so insulation LF cannot be derived with provenance at all — only factored. §7 of `derived-quantities.md`. |
+| 6 | `UnitOfMeasure` | `LUMP_SUM = "LS"` | The enum has `LOT`; every estimator spreadsheet writes `LS`. §1.5. Blocked on §8 question 4, which is the owner's to answer. |
 | 8 | `TakeoffLine` | `section_code String(4)` + `line_ordinal Integer` | The `Item` column (`B04`). `cost_code` exists but means a job cost code; overloading it would be a lie in a column name. |
 | 9 | `PipelineRun.model_versions` | key `"vocabulary": VOCABULARY_VERSION` | Written by convention, no migration needed — noted here so it is not forgotten. An export whose words have since changed must still say which words it used. |
 
-Every one of these is additive and nullable-friendly, so they land as one new
-Alembic migration (`AGENTS.md` §4) whenever the aggregator slice starts.
+All four remain additive and nullable-friendly, and land whenever the
+aggregator slice starts (`AGENTS.md` §4).
 
 ---
 
