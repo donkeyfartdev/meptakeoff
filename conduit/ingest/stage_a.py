@@ -25,6 +25,11 @@ The rules this module is built to keep
    the run finishes ``completed_with_errors``. The synthetic corpus contains
    two deliberately corrupt pages precisely so this path is exercised on every
    test run.
+5. **A page failure is visible in the audit trail.** Every page emits exactly
+   one of ``sheet.ingested`` or ``sheet.ingest_failed`` — never a success event
+   for a page that failed. Reading the ``audit_event`` table alone must tell a
+   reviewer which pages did not ingest; anything less is an audit trail that
+   quietly says everything was fine.
 
 Idempotence
 -----------
@@ -125,6 +130,7 @@ class PageReport:
     bytes_written: int = 0
     text_span_count: int = 0
     path_count: int = 0
+    paths_object_key: str | None = None
     has_vector_text: bool = False
     full_page_raster: bool = False
     stages: list[StageReport] = field(default_factory=list)
@@ -578,7 +584,14 @@ def _process_page(
             entity_id=None,
             document_id=document.id,
             pipeline_run_id=run.id,
-            payload={"page_number": page, "stage": StageName.RASTERISE.value},
+            payload={
+                "page_number": page,
+                "stage": StageName.RASTERISE.value,
+                "failed_stages": _failed_stage_summaries(report),
+                "traceback_location": (
+                    f"page_task_state(pipeline_run_id={run.id}, page_number={page})"
+                ),
+            },
         )
         return report
 
@@ -624,6 +637,9 @@ def _process_page(
         )
         report.path_count = artifact.path_count
         report.bytes_written += artifact.ref.size_bytes
+        # Queryable provenance, not just an audit payload key (AGENTS.md §5).
+        sheet.paths_object_key = artifact.ref.key
+        report.paths_object_key = artifact.ref.key
         artifacts["paths_object_key"] = artifact.ref.key
         artifacts["paths_codec"] = artifact.codec
         artifacts["path_count"] = artifact.path_count
@@ -652,25 +668,50 @@ def _process_page(
     )
     report.stages.append(_stage_report(StageName.TEXT_INDEX, status, timing, error))
 
+    # A page that failed any stage does NOT get a success event. An audit trail
+    # that reads `sheet.ingested` for a page whose raster and text never
+    # materialised is worse than silence: it tells a reviewer the page is fine.
+    # Exactly one of these two events is emitted per page, always.
+    payload = {
+        "page_number": page,
+        "rotation_deg": report.rotation_deg,
+        "width_px": report.width_px,
+        "height_px": report.height_px,
+        "render_dpi": cfg.render_dpi,
+        "text_span_count": report.text_span_count,
+        **artifacts,
+    }
+    if report.failed:
+        payload["failed_stages"] = _failed_stage_summaries(report)
+        payload["traceback_location"] = (
+            f"page_task_state(pipeline_run_id={run.id}, page_number={page})"
+        )
     _audit(
         session,
-        event_type="sheet.ingested",
+        event_type="sheet.ingest_failed" if report.failed else "sheet.ingested",
         entity_type="sheet",
         entity_id=report.sheet_id,
         document_id=document.id,
         pipeline_run_id=run.id,
-        payload={
-            "page_number": page,
-            "rotation_deg": report.rotation_deg,
-            "width_px": report.width_px,
-            "height_px": report.height_px,
-            "render_dpi": cfg.render_dpi,
-            "text_span_count": report.text_span_count,
-            "failed": report.failed,
-            **artifacts,
-        },
+        payload=payload,
     )
     return report
+
+
+def _failed_stage_summaries(report: PageReport) -> list[dict[str, str]]:
+    """One line per failed stage: which stage, and the exception line.
+
+    The full traceback stays on ``PageTaskState.error`` — the audit payload
+    carries enough to know *what* broke plus where to read the rest, so the
+    audit table does not become a log store.
+    """
+    out: list[dict[str, str]] = []
+    for stage in report.stages:
+        if stage.status != TaskStatus.FAILED.value:
+            continue
+        last = (stage.error or "").strip().splitlines()
+        out.append({"stage": stage.stage, "error": last[-1] if last else "unknown error"})
+    return out
 
 
 def _stage_report(

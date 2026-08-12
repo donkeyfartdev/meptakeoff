@@ -205,31 +205,22 @@ def test_text_span_counts_follow_the_manifest(ingested) -> None:
         else:
             assert got > 0, f"page {page} is a vector page and must yield spans"
             assert sheets[page].has_vector_text is True
-            if page % 7 != 0:  # see test_rotated_title_block_wraps_in_the_corpus
+            if True:  # every page carries its own sheet number since slice C
                 assert any(spec["sheet_number"] in t for t in texts[page]), (
                     f"page {page} should carry its own sheet number {spec['sheet_number']}"
                 )
         assert sheets[page].text_span_count == got
 
 
-def test_rotated_title_block_wraps_in_the_corpus(ingested) -> None:
-    """A finding about the *corpus*, pinned so nobody re-derives it.
+def test_rotated_title_block_is_indexed_at_its_true_angle(ingested) -> None:
+    """The sideways title block must survive ingest whole.
 
-    ``make_corpus`` sets a 90-degree title block on every 7th page via
-    ``insert_textbox(rotate=90)``. Rotating the text does not rotate the box,
-    so the writer wraps each field into narrow columns and splits tokens
-    mid-word: the PDF for page 7 genuinely contains ``M-1`` and ``02`` as two
-    separate lines, not ``M-102``.
-
-    Consequences, stated so they are not mistaken for a merge bug:
-
-    * no line merge can recover ``M-102`` from that page — the space between
-      the fragments is a real line break in the content stream;
-    * therefore the corpus **cannot** be used to test reading a rotated title
-      block, which is a stage B concern that needs real sheets (risk R10).
-
-    What stage A must still do is keep the rotated text at its true angle, so a
-    later stage can at least find it. That is what this asserts.
+    It used to not: ``make_corpus`` drew the 90-degree block with
+    ``insert_textbox(rotate=90)`` without rotating the rect, so the writer
+    wrapped mid-token and page 7 genuinely contained ``M-1`` and ``02``. Slice
+    C fixed the generator (a rotated block is now a rotated *rect*); this test
+    keeps stage A honest about the angle, and
+    ``tests/test_corpus_titleblock.py`` pins the generator itself.
     """
     with ingested.Session() as session:
         rotated = session.execute(
@@ -243,8 +234,10 @@ def test_rotated_title_block_wraps_in_the_corpus(ingested) -> None:
     assert rotated, "the rotated title block must still be indexed"
     assert all(abs(rot - 90.0) < 0.01 for _, rot in rotated)
     fragments = {text for text, _ in rotated}
-    assert {"M-1", "02"} <= fragments
-    assert "M-102" not in fragments
+    assert any("M-102" in text for text in fragments), (
+        "the rotated title block must survive as unbroken tokens (slice C fixed the "
+        "generator; tests/test_corpus_titleblock.py pins the corrected behaviour)"
+    )
     # The font-size guard added to the merge (see textlines.py) must keep
     # different title-block fields apart.
     assert not any(text.startswith("MECHASH") for text in fragments)
@@ -329,7 +322,9 @@ def test_paths_artifact_is_readable_and_in_pdf_points(ingested) -> None:
             )
         ).scalars().all()
 
-    ok = [e for e in events if not e.payload["failed"]]
+    # sheet.ingested now fires only for pages that actually ingested; a failed
+    # page emits sheet.ingest_failed instead (tests/test_stage_a_provenance.py).
+    ok = list(events)
     assert len(ok) == ingested.manifest.page_count - len(ingested.manifest.corrupt_pages)
     sample = ok[0]
     blob = ingested.store.get_bytes(sample.payload["paths_object_key"])

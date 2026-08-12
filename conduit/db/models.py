@@ -498,6 +498,12 @@ class Sheet(TimestampMixin, Base):
     thumbnail_object_key: Mapped[str | None] = mapped_column(String(1024))
     tile_base_key: Mapped[str | None] = mapped_column(String(1024))
     tile_max_zoom: Mapped[int | None] = mapped_column(Integer)
+    #: Vector-path dump for the page (``paths.json.zst``), written by stage A
+    #: and read by D and E. It is a column rather than an audit-payload key
+    #: because provenance a reviewer has to reconstruct out of JSON is not
+    #: queryable provenance: "which sheets have no vector paths" must be a
+    #: WHERE clause.
+    paths_object_key: Mapped[str | None] = mapped_column(String(1024))
 
     has_vector_text: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     ocr_applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
