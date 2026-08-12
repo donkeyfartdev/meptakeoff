@@ -86,6 +86,26 @@ payload is not queryable provenance — if a reviewer needs it, give it a column
 Evidence is immutable; interpretation is versioned. Never mutate an evidence row
 to "fix" it — supersede it with a new interpretation.
 
+## 5a. Material names are generated, never typed
+
+The estimator-facing output has to **join** to a pricebook we do not own, so no
+material name is ever free text. Every name comes out of
+`conduit/materials/` — `render_item_name()` over a `Material`, an `ItemType`
+and a `Size` — and every size has exactly one display form and one key, where
+the key is *defined* as `normalize_text(display)`, the same normaliser stage A
+uses for `TextSpan.normalized_text`.
+
+If you need a word the vocabulary does not have, **add it to the registry**;
+do not write the string at the call site. An unresolvable name is a review
+item, never a new line item. Electrical and HVAC wording lives in
+`conduit/materials/proposed.py` and is unconfirmed by the owner — the whole
+file is `PROPOSED_PENDING_OWNER` and is meant to be replaced wholesale.
+
+The specification is `docs/output-schema.md`; derived-quantity rules and the
+counted-versus-factored distinction are in `docs/derived-quantities.md`. Both
+are verified against the ORM with the team's `verify-docs-against-models`
+skill — run it after editing either.
+
 ## 6. Honesty about numbers
 
 - The only input in this repo is **synthetic** (`bench/CORPUS.md`,
