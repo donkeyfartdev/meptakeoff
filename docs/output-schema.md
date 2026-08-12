@@ -32,7 +32,7 @@ Takeoff**, header row 4) with everything to the right of `Unit` dropped —
 | 3 | `Size / Spec` | string | `Size.display` | yes (item has no size) |
 | 4 | `Material` | string | `Material.token` | yes (item has no material) |
 | 5 | `Qty` | decimal(18,4) | `TakeoffLine.quantity` | no |
-| 6 | `Unit` | enum | `EA` \| `LF` \| `LS` | no |
+| 6 | `Unit` | enum | `EA` \| `LF` \| `LB` \| `LS` | no |
 | 7 | `Notes / Location` | string | **generated** from evidence, §4 | no |
 
 ### 1.1 `Item`
@@ -94,21 +94,44 @@ setting, applied after the sum.
 
 ### 1.5 `Unit`
 
-Exactly three values reach the estimator:
+Four values reach the estimator:
 
-| Unit | Meaning | Which items |
+| Unit | Meaning | Which items (`ItemCategory`) |
 |---|---|---|
-| `EA` | each, a count | fittings, valves, fixtures, devices, equipment, hangers |
-| `LF` | linear feet | pipe, tube, conduit, wire, duct, insulation |
+| `EA` | each, a count | fittings, **conduit bodies**, duct fittings, valves, fixtures, devices, equipment, hangers, accessories |
+| `LF` | linear feet | pipe, tube, conduit, wire, **flex duct**, insulation |
+| `LB` | pounds of fabricated metal | **fabricated sheet-metal duct** |
 | `LS` | lump sum (quantity is always `1`) | allowances: demolition, temporary services, cleanup |
 
 The unit is **derived from `ItemCategory`**, not chosen per line
 (`default_uom()`), so a fitting can never arrive as `LF` because someone
-mis-typed a row.
+mis-typed a row. That is also why the owner's answer below is one edit to a
+mapping rather than a rule every writer has to remember.
 
-`SF`, `CF`, `LB` and `HR` exist in `UnitOfMeasure` and are **not** exported.
-`LB` and `SF` become live if HVAC duct is taken off by fabricated weight or by
-sheet-metal area — which is an open question (§8), not a decision.
+> **`LB` is now live: duct is taken off by the pound.** Owner-directed —
+> *"duct gets taken off by the pound"*, answering §8 question 2. In the
+> vocabulary this is `ItemCategory.DUCT → UnitOfMeasure.POUNDS`.
+>
+> Two consequences, both deliberate:
+>
+> * **Flex duct is not in that category.** It is bought by the foot off a roll
+>   rather than fabricated from sheet, so it has its own category
+>   (`ItemCategory.DUCT_FLEX`) and stays `LF`. Weighing it would be a number we
+>   invented.
+> * **A pound is a computation, not an observation.** Nothing on a drawing says
+>   "412 lb". The rule that turns traced geometry into pounds — and the gauge
+>   question that is its weak link — is `docs/derived-quantities.md` §6.6. Where
+>   the gauge is assumed rather than read, the line says so.
+>
+> Duct *fittings* stay `EA`: an elbow is a thing you count, and its metal is
+> accounted in the duct pounds line. The two are never added together — they
+> have different units and different aggregation keys — and whether the owner's
+> estimators want fitting weight broken out separately is an open question (§8).
+
+`SF`, `CF` and `HR` exist in `UnitOfMeasure` and are still **not** exported.
+`SF` would become live if duct liner and duct wrap are taken off by the square
+foot, which is how the trade often does it; they are currently `LF` with pipe
+insulation, and that is unconfirmed (§8).
 
 > **Defect to fix in a later slice.** `UnitOfMeasure` has no `LS` member. It
 > has `LOT = "LOT"`. The workbook, and every estimator spreadsheet like it,
@@ -243,29 +266,88 @@ Each entry records **per trade** where its wording came from:
 | `TRADE_STANDARD` | ordinary trade usage, not in the workbook, low risk |
 | `PROPOSED_PENDING_OWNER` | **we made it up as a starting point** |
 
-### 2.3 PROPOSED — electrical and HVAC
+### 2.3 The four electrical words the owner confirmed
 
-> **The owner has not supplied electrical or HVAC wording.** Everything in
-> `conduit/materials/proposed.py` — EMT/IMC/rigid/flex/liquidtight, THHN and
-> XHHW, LB/LL/LR and T/C condulets, connectors, boxes, receptacles, switches,
-> panelboards; duct, flex duct, radius and mitered elbows, transitions, taps,
-> spin-ins, dampers, diffusers, VAV boxes, RTUs — is
-> `PROPOSED_PENDING_OWNER_CONFIRMATION`. It is a defensible starting point
-> assembled from ordinary trade usage. It is not agreed, and no claim is made
-> that these are the words estimators write.
+> Owner, verbatim in substance: *"the electrical fitting words my estimators use
+> — **LB**, **condulet**, **coupling**, **connector**."*
+
+Those four are `OWNER_SOURCED` and live in `vocabulary.py`, not in
+`proposed.py` — that file is a proposal meant to be replaced wholesale, and a
+decision left in it would go with it. `coupling` is one shared entry with
+plumbing: one word, one entry, one key, now owner-sourced for both trades.
+
+Two things had to be decided to encode four words honestly.
+
+**`condulet` is the family; `LB` is a member of it.** An LB *is* a condulet — a
+conduit body — so they are not siblings. Modelling them as siblings would let
+one physical fitting open two aggregation keys and sum separately, which is the
+material-blind-key defect of §5 in a different column. So:
+
+| Word | Resolves to | Can it become a line? |
+|---|---|---|
+| `LB`, `type LB`, `LB condulet` | `ItemType` `CONDULET_LB` (category `CONDUIT_BODY`) | yes |
+| `condulet`, `conduit body`, `condulets` | `Family` `CONDUIT_BODY` | **no** |
+
+Both resolve, because an estimator who writes a correct trade word should not
+be told it is unknown. But a `Family` is not an `ItemType`; `item_key()` raises
+`TypeError` if handed one. A bare "condulet" is therefore an **under-specified
+review item** — an LB, an LL, an LR, a T and a C are all condulets and they cost
+differently, so which one was meant is a question for a human, not a default.
+`family_members()` is the list to offer that human.
+
+Asking for a family word through the item-type door fails **explicitly**:
+`resolve_item_type("condulet")` raises `UnderSpecifiedTerm` (a subclass of
+`AmbiguousTerm`), carrying `.family` and `.candidates`. It does not return
+`None`. `None` from a resolver means "this vocabulary has never heard that
+word", and a family word is the opposite of unknown — returning `None` for it
+would make a word an estimator actually says surface as
+`AttributeError: 'NoneType' object has no attribute 'code'` at whatever
+unrelated line first touched the result. The difference from `LB` below is real
+and is why the type is narrower: `AmbiguousTerm` on `"LB"` is settleable by the
+caller with `discipline=`, whereas nothing the caller can pass names one
+conduit body — only a human reading the drawing can.
+
+**`LB` is ambiguous and is never guessed.** `LB` is the conduit body, and `LB`
+is also `UnitOfMeasure.POUNDS` — the unit duct is now taken off in (§1.5). Both
+meanings are live in the same export. They are kept apart twice over:
+
+1. *Structurally.* The conduit body enters an aggregation key as its **code**,
+   `CONDULET_LB`, never as its token `LB`; the pound appears as an enum member
+   in the `Unit` column. No string is shared, so no arithmetic can merge duct
+   weight with conduit-body counts. A test asserts no `ItemType.code` equals
+   any `UnitOfMeasure` value.
+2. *At the boundary.* Any lookup that could receive either — `resolve_term()`,
+   `resolve_item_type()`, `resolve_unit()` — raises `AmbiguousTerm` on a bare
+   `"LB"` unless the caller passes `discipline=` or an explicit `prefer=`,
+   exactly as `parse_size(prefer=…)` handles `2 x 1`. Electrical settles it to
+   the fitting, mechanical to the pound; plumbing settles nothing and still
+   raises.
+
+### 2.4 PROPOSED — the rest of electrical and HVAC
+
+> **Everything else in `conduit/materials/proposed.py` is unconfirmed** —
+> EMT/IMC/rigid/flex/liquidtight, THHN and XHHW, the LL/LR/T/C condulets,
+> boxes, receptacles, switches, panelboards; duct, flex duct, radius and
+> mitered elbows, transitions, taps, spin-ins, dampers, diffusers, VAV boxes,
+> RTUs — all `PROPOSED_PENDING_OWNER_CONFIRMATION`. It is a defensible starting
+> point assembled from ordinary trade usage. It is not agreed, and no claim is
+> made that these are the words estimators write. Note that duct's **unit** is
+> now decided even though duct's **wording** is not: they are separate
+> questions and the unit is a property of the category.
 
 It is one file so replacing it is one edit. `pending_owner_confirmation()`
 generates the review list from the data, so it cannot drift out of date with
 the vocabulary — including the handful of plumbing-sourced words (`PVC`, `tee`,
-`90`, `coupling`, `reducer`, `hanger`…) that are *also* offered to electrical
-or HVAC and are equally unconfirmed there.
+`90`, `reducer`, `hanger`…) that are *also* offered to electrical or HVAC and
+are equally unconfirmed there.
 
-Current count, generated: **99 (entry, trade) pairs pending owner
-confirmation.** A test asserts every electrical and mechanical item type is
-still marked proposed; that test is designed to fail the day real wording
-lands, which is the prompt to re-run this section.
+Current count, generated: **96 (entry, trade) pairs pending owner
+confirmation** — down from 99, the three being `CONDULET_LB`, `CONNECTOR` and
+`COUPLING` for electrical. A test asserts that every electrical and mechanical
+item type *except those three* is still marked proposed, so promoting a word
+without an owner's answer breaks the build.
 
-### 2.4 What the vocabulary deliberately does not do
+### 2.5 What the vocabulary deliberately does not do
 
 It does not price, does not carry labor, does not encode a manufacturer or a
 model number (that is `ScheduleRow.manufacturer` / `model_number`), and does
@@ -453,16 +535,36 @@ aggregator slice starts (`AGENTS.md` §4).
 
 ## 8. Open questions for the owner
 
-1. **The electrical fitting words.** Does the estimator write `LB`, `condulet`,
-   `Type LB body`? Are conduit couplings and connectors counted at all, or
-   carried inside a per-100-ft allowance? Is wire taken off by conductor-foot
-   or by circuit-foot with a conductor count? (This is the highest-value
-   question here: it decides both wording and *what gets counted*.)
-2. **The duct words, and the duct unit.** Is duct taken off by the pound of
-   fabricated metal, by the linear foot, or by the square foot of sheet metal?
-   All three are in use and the answer changes the `Unit` column, not just the
-   wording. Are duct fittings counted individually or folded into a fabrication
-   allowance?
+The two head questions here have been **answered** and the answers are built;
+they are kept, struck through, with what they left open.
+
+0. **The duct gauge source — now the top ask.** Pounds are computed from
+   geometry × gauge, and the gauge is the weak link
+   (`docs/derived-quantities.md` §6.6). Two sources, differently honest: (a) the
+   gauge stated in the job's duct schedule or specification, which we *read*, so
+   the pounds inherit the geometry's provenance; or (b) a standard SMACNA table
+   by size and pressure class, which we *apply*, so the line must say the gauge
+   was assumed. We have built both and (b) labels itself. Which one applies on
+   the owner's jobs — and, if (b), which table edition and whose copy of it —
+   is unanswered. It is now the highest-value HVAC question, because it decides
+   whether a duct pound is measured or factored.
+1. ~~**The electrical fitting words.**~~ **Answered**: LB, condulet, coupling,
+   connector — built, §2.3. Still open from the same question: is wire taken
+   off by conductor-foot or by circuit-foot with a conductor count? Are the
+   other condulet letters (LL, LR, T, C) words the estimator writes? And a
+   reading we have assumed rather than been told: because "coupling" was named
+   as a fitting word, conduit couplings are **counted as their own line**, not
+   folded into a per-100-ft allowance — though the *quantity* on that line
+   still comes from stock length and is labelled `factored`
+   (`derived-quantities.md` §6.2). If that reading is wrong, §6.2 is what
+   changes.
+2. ~~**The duct unit.**~~ **Answered**: the pound — built, §1.5. Still open:
+   are duct fittings counted individually (they are `EA` today, with their
+   metal in the duct pounds line) or folded into a fabrication allowance? Are
+   duct liner and duct wrap taken off by the square foot rather than the linear
+   foot they currently carry? Is a seam/waste percentage added to fabricated
+   weight, and if so is it the estimator's number or ours (we have not invented
+   one)?
 3. **Section structure for electrical and HVAC** — the A–F equivalent.
 4. **`LS` vs `LOT`** — confirm the workbook's `LS` is the wording to ship.
 5. **Fittings by type, confirmed.** The workbook aggregates fittings by size

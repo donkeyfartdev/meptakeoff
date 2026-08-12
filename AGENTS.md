@@ -97,9 +97,34 @@ uses for `TextSpan.normalized_text`.
 
 If you need a word the vocabulary does not have, **add it to the registry**;
 do not write the string at the call site. An unresolvable name is a review
-item, never a new line item. Electrical and HVAC wording lives in
-`conduit/materials/proposed.py` and is unconfirmed by the owner — the whole
-file is `PROPOSED_PENDING_OWNER` and is meant to be replaced wholesale.
+item, never a new line item.
+
+Electrical and HVAC wording is *mostly* still unconfirmed and lives in
+`conduit/materials/proposed.py` — that whole file is `PROPOSED_PENDING_OWNER`
+and is meant to be replaced wholesale, so **never leave a confirmed word in
+it**. The words the owner has confirmed live in `vocabulary.py`
+(`ELECTRICAL_ITEM_TYPES`, `CONDUIT_BODY_FAMILY`, and the shared `COUPLING`
+entry). Promoting a word requires an owner answer and an edit to
+`tests/test_materials_vocabulary.py`, which asserts the exact confirmed set.
+
+Two rules that vocabulary now enforces and that are easy to break by accident:
+
+- **The unit is a property of `ItemCategory`, never of a line.** Duct is
+  `LB` because `ItemCategory.DUCT` maps to `POUNDS` (owner-directed), flex duct
+  is `LF` because it is a different category. If you find yourself choosing a
+  unit at a call site, the category is wrong.
+- **A family word is not a line item, and an ambiguous word is not resolved.**
+  `condulet` resolves to a `Family` and can never open an aggregation key; `LB`
+  means both a conduit body and a pound, so `resolve_term()` /
+  `resolve_item_type()` / `resolve_unit()` raise `AmbiguousTerm` without a
+  `discipline=` or `prefer=`. Do not add a "sensible default" to either.
+- **`None` from a resolver means "unknown word" and nothing else.** A word the
+  vocabulary *does* know but cannot turn into one line raises — `condulet`
+  through `resolve_item_type()` raises `UnderSpecifiedTerm`. Returning `None`
+  for a known word is how a real trade term becomes an `AttributeError` on
+  `.code` three call sites away. New family or class words inherit this;
+  `test_no_word_this_vocabulary_knows_returns_none_from_resolve_item_type`
+  enforces it for every registered spelling.
 
 The specification is `docs/output-schema.md`; derived-quantity rules and the
 counted-versus-factored distinction are in `docs/derived-quantities.md`. Both
