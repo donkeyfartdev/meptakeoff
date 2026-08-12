@@ -6,8 +6,9 @@ must support and where each derived number's evidence comes from, so the stages
 are built to produce checkable numbers rather than retrofitted to explain them.
 
 Companion to `docs/output-schema.md`. Vocabulary codes referenced here
-(`ELBOW_90`, `TEE`, `REDUCER`, `HANGER`, `INSULATION`, `COUPLING`) are the
-`ItemType.code` values in `conduit/materials/vocabulary.py`.
+(`ELBOW_90`, `TEE`, `REDUCER`, `HANGER`, `INSULATION`, `COUPLING`, `DUCT`,
+`CONDULET_LB`) are the `ItemType.code` values in
+`conduit/materials/vocabulary.py`.
 
 ---
 
@@ -329,6 +330,15 @@ provenance = the chain it came from. Couplings that *are* geometric — a no-hub
 coupling at a joint drawn on the sheet — come from detection or from R4/R6 and
 are a different, counted line.
 
+> **Owner input, and the assumption we drew from it.** `coupling` is one of the
+> four electrical fitting words the owner confirmed, which settles the question
+> `output-schema.md` §8 asked: conduit couplings **get their own line item** and
+> are not folded into a per-100-ft raceway allowance. What it does *not* settle
+> is where the number on that line comes from. We have assumed it still comes
+> from stock length, i.e. this rule, which means the line reads `factored` and
+> names the stick length used. If the owner meant that couplings are counted off
+> the drawings, this rule is what changes — the vocabulary entry does not.
+
 ### 6.3 Fittings per foot → **fallback only, never a default**
 
 The workbook's own approach is `Copper Fittings – 1/2" (elbows, tees,
@@ -382,6 +392,93 @@ human-readable. Derived fittings and factored quantities should follow exactly
 that pattern: **a derived number that cannot name its justification does not
 get written.**
 
+### 6.6 Fabricated duct weight → `DUCT`, in `LB` — **measured or factored, and which one depends entirely on the gauge**
+
+Owner-directed: *"duct gets taken off by the pound."* So `ItemCategory.DUCT`
+carries `UnitOfMeasure.POUNDS` (`output-schema.md` §1.5) and the `Qty` on a duct
+line is a weight. Nothing on a drawing says "412 lb" — a pound here is the end
+of a computation, and this section exists to say exactly which inputs it has and
+which of them can be pointed at on a sheet.
+
+**The chain.**
+
+```
+Measurement.polyline_points × SheetScale        → length_ft        [coordinates]
+duct size tag  (12x8, or Ø10")                  → w_in, h_in       [tag bbox]
+    perimeter_ft = 2 × (w_in + h_in) / 12       (rectangular)
+                 = π × d_in / 12                (round)
+area_ft2 = length_ft × perimeter_ft
+         + Σ developed area of the fittings on the run
+gauge  →  lb_per_ft2(material, gauge)           → the weak link    [see below]
+pounds = area_ft2 × lb_per_ft2  × (1 + seam_waste)   ← seam_waste is a project
+                                                       setting, default none
+```
+
+Every input above the gauge line has a coordinate: the run is a `Measurement`
+with `polyline_points`, the size comes from a `TextSpan` with a bbox, and the
+arithmetic between them is reproducible. The gauge has no coordinate unless
+somebody wrote it down.
+
+**Path (a) — the gauge is stated on the job.** A duct schedule, a keynote or the
+specification says "24 ga, 2 in. w.g.". We *read* it: the evidence is a
+`ScheduleRow` or a `TextSpan` with a bbox, alongside the `Measurement` rows, and
+the pounds inherit the geometry's provenance.
+
+* `TakeoffLine.derivation = measured`.
+* Evidence: the run's `Measurement` rows **and** the schedule row / text span
+  the gauge came from. `Σ contribution_qty` still decomposes the weight per
+  contributing run, so a reviewer can check one run at a time.
+* `Notes / Location`: `M-201, M-202 · 24 ga per duct schedule on M-501 · measured`.
+
+**Path (b) — the gauge comes from a standard table.** SMACNA's duct-construction
+tables select a gauge from duct size and pressure class. That is a table *we*
+apply, not a fact the drawing stated, so the output has to say so — in the
+column the estimator reads, using the factor machinery that landed in PR #4:
+
+* `TakeoffLine.derivation = factored`.
+* `factor_rule_id = "duct_gauge_table"`, `factor_rule_version` = the table
+  identity and edition as configured, `factor_value` = the `lb/ft²` actually
+  applied, `factor_basis` = `{"duct_size": "12x8", "pressure_class": "2 in wg",
+  "gauge": "24 ga", "material": "galv steel", "table": …}`.
+  `ck_line_factored_carries_factor` refuses the line without the first three.
+* Evidence: still the `Measurement` rows — the *area* is measured either way —
+  plus a `derived_from_line` row where the weight was factored off another line.
+* `Notes / Location`: `M-201 · 12x8 galv duct · factored: gauge assumed 24 ga
+  (duct_gauge_table v…, 2 in. w.g.) — not read from the drawings`.
+
+**A line's grade is the weakest of its inputs.** Path (b) is `factored` even
+though its geometry is measured, because the number an estimator would have to
+check is the gauge, and the gauge is ours. Grading the line by its strongest
+input is how a guess ends up looking like a measurement.
+
+**What is not shipped here, and why.** No `lb/ft²` values and no size/pressure →
+gauge selection appear in this repo. Two reasons, both load-bearing: the numbers
+belong to a published table with an edition and a publisher (SMACNA's are
+copyrighted; the customer has the book), and quoting figures we have not
+verified is exactly the invented-number failure the rest of this document is
+about. The table is therefore **data, supplied and versioned as a project
+setting**, and `factor_rule_version` records which version produced a given
+export.
+
+**Pressure class cannot be derived from geometry.** It comes from the
+specification or the duct schedule and nowhere else. If neither is readable,
+path (b) has no input to select a gauge from and **abstains**: no pounds line,
+a review flag on the sheet. Assuming a pressure class in order to assume a gauge
+is a guess about a guess, and there is no honest label for that.
+
+**Duct fittings.** An elbow, a transition or a take-off is counted (`EA`, its
+own line, its own key) *and* contributes its developed area to the run's
+pounds. The two are never added together — different units, different
+aggregation keys — but whether the owner's estimators want fitting weight broken
+out as its own line is an open question (`output-schema.md` §8).
+
+**How this gets measured.** Like everything else here: not from synthetic
+geometry. Given one real job taken off by weight, compare our pounds per system
+against the estimator's and report the spread, separately for path (a) and path
+(b) runs — the difference between those two spreads is the price of assuming a
+gauge, and it is currently unknown. And §5.5 still governs: the pounds are never
+better than the trace they came from.
+
 ---
 
 ## 7. Summary — grade per rule
@@ -402,9 +499,13 @@ get written.**
 | 6.3 fittings/ft fallback | `fittings (assorted)` | **factored** | none |
 | 6.4 insulation | `INSULATION` | measured *(blocked on schema)* / factored | inherits run |
 | 6.4b fitting insulation | `INSULATION` | **factored** | none |
+| 6.6 duct weight, gauge **read** | `DUCT` (`LB`) | measured | inherits run + gauge source bbox |
+| 6.6 duct weight, gauge **assumed** | `DUCT` (`LB`) | **factored** — gauge is ours | inherits run; the gauge has none |
 
-Four of thirteen are factors, and all four say so on the line the estimator
-reads.
+Fifteen rows. Four are always factors; 6.6 is a measurement or a factor
+depending on where its gauge came from, and it is the only rule here whose grade
+is decided by an input rather than by the rule. All of them say which on the
+line the estimator reads.
 
 ---
 
@@ -423,6 +524,12 @@ reads.
   Until it exists, a run crossing a match line is two runs, and its fittings
   are counted at both ends of the break — a known, named over-count rather than
   a surprise.
+* **Which gauge source applies on the owner's jobs is unanswered** (§6.6), and
+  it is the first thing to ask about duct: it decides whether a duct pound is
+  measured or factored. Nor do we ship any `lb/ft²` table — those numbers are a
+  published table's, with an edition, and we do not quote figures we have not
+  verified. What a `duct_gauge_table v…` assumption costs in accuracy is
+  unmeasured and will stay so until a real job taken off by weight exists.
 * **Whether estimators will accept derived fittings at all** is unknown. The
   fallback position — ship the geometry, show the coordinates, let the
   estimator confirm per sheet — is cheaper to build than to argue about, and is

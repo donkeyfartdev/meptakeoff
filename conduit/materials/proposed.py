@@ -4,6 +4,16 @@
 NOTHING IN THIS FILE HAS BEEN CONFIRMED BY AN ESTIMATOR OR BY THE OWNER.
 ===========================================================================
 
+**What has left this file.** The owner has confirmed four electrical words —
+``LB``, ``condulet``, ``coupling``, ``connector`` — and they now live in
+``vocabulary.py`` (``ELECTRICAL_ITEM_TYPES``, ``CONDUIT_BODY_FAMILY``, and the
+shared ``COUPLING`` entry). They are gone from here on purpose: this file stays
+the thing that can be deleted and rewritten in one edit, and a confirmed word in
+it would be lost the moment that happens. The owner has also settled the HVAC
+unit — **duct is taken off by the pound** — which is a category-to-unit decision
+in ``vocabulary.py`` (``ItemCategory.DUCT`` → ``POUNDS``), not a word; the duct
+*wording* below is still a proposal.
+
 The owner supplied a plumbing takeoff workbook, so the plumbing vocabulary in
 ``vocabulary.py`` is seeded from words a real estimator wrote. For electrical
 and HVAC we have no such source. What follows is a defensible starting point
@@ -26,14 +36,17 @@ supplies the real words:
 Specific things we are guessing at and would rather be told (see
 ``docs/output-schema.md`` §8, open questions):
 
-* Electrical: does the estimator write ``LB``, ``condulet``, ``Type LB body``?
-  Are conduit couplings and connectors counted at all, or carried in a
-  per-100-ft allowance? Is wire taken off by conductor-foot or by
-  circuit-foot with a conductor count?
-* HVAC: is duct taken off by the pound (fabricated weight), the linear foot,
-  or the square foot of sheet metal? All three are in use, and the answer
-  changes the ``Unit`` column, not just the wording. Are duct fittings counted
-  individually or folded into a fabrication allowance?
+* Electrical, **partly answered**: the fitting words are LB, condulet,
+  coupling, connector, and those four are confirmed and have moved. Still
+  unanswered: is wire taken off by conductor-foot or by circuit-foot with a
+  conductor count? Are the other condulet letters (LL, LR, T, C) words the
+  estimator writes, or does everything unqualified get called an LB?
+* HVAC, **unit answered**: duct is taken off by the pound. Everything about
+  *how the pounds are arrived at* is still open, and the first question is the
+  gauge source — read off the duct schedule, or assumed from a standard table
+  (``docs/derived-quantities.md`` §6.6). Also open: are duct fittings counted
+  individually or folded into a fabrication allowance, and are duct liner and
+  wrap taken off by the square foot rather than the linear foot?
 
 No accuracy or coverage claim is made for this list. It is a vocabulary, not
 a model.
@@ -61,9 +74,11 @@ _PROPOSED = VocabStatus.PROPOSED_PENDING_OWNER
 #: mechanical, and are therefore equally unconfirmed for those trades. Listed
 #: here only for the human reader; ``pending_owner_confirmation()`` derives the
 #: authoritative list from the registry data.
+#: ``COUPLING`` was in this list and is not any more: the owner named it, so
+#: its electrical status is ``OWNER_SOURCED`` in ``vocabulary.py``.
 SHARED_ENTRIES_ALSO_PROPOSED: tuple[str, ...] = (
     "PVC_SCH40", "STAINLESS", "GALV_STEEL", "FIBERGLASS",
-    "ELBOW_90", "ELBOW_45", "TEE", "COUPLING", "REDUCER", "BUSHING", "CAP",
+    "ELBOW_90", "ELBOW_45", "TEE", "REDUCER", "BUSHING", "CAP",
     "INSULATION", "HANGER", "ALLOWANCE",
 )
 
@@ -105,17 +120,19 @@ ITEM_TYPES: tuple[ItemType, ...] = (
     ItemType("CABLE_TRAY", "cable tray", ItemCategory.CONDUIT, ((_E, _PROPOSED),),
              aliases=("tray",)),
     # --- electrical: raceway fittings ---
-    ItemType("CONNECTOR", "connector", ItemCategory.FITTING, ((_E, _PROPOSED),),
-             aliases=("conduit connector", "set screw connector")),
-    ItemType("CONDULET_LB", "LB", ItemCategory.FITTING, ((_E, _PROPOSED),),
-             aliases=("lb condulet", "type lb", "lb body")),
-    ItemType("CONDULET_LL", "LL", ItemCategory.FITTING, ((_E, _PROPOSED),),
+    # CONNECTOR and CONDULET_LB have moved to vocabulary.py: owner-confirmed.
+    # The remaining condulet letters are still proposed *wording*, but they are
+    # conduit bodies, so they carry ItemCategory.CONDUIT_BODY — the family the
+    # owner's "condulet" names. Category is structure, not wording: putting
+    # them anywhere else would leave the family with one member and make
+    # family_members() lie to the reviewer who asks "which condulet?".
+    ItemType("CONDULET_LL", "LL", ItemCategory.CONDUIT_BODY, ((_E, _PROPOSED),),
              aliases=("ll condulet", "type ll")),
-    ItemType("CONDULET_LR", "LR", ItemCategory.FITTING, ((_E, _PROPOSED),),
+    ItemType("CONDULET_LR", "LR", ItemCategory.CONDUIT_BODY, ((_E, _PROPOSED),),
              aliases=("lr condulet", "type lr")),
-    ItemType("CONDULET_T", "T condulet", ItemCategory.FITTING, ((_E, _PROPOSED),),
+    ItemType("CONDULET_T", "T condulet", ItemCategory.CONDUIT_BODY, ((_E, _PROPOSED),),
              aliases=("type t condulet",)),
-    ItemType("CONDULET_C", "C condulet", ItemCategory.FITTING, ((_E, _PROPOSED),),
+    ItemType("CONDULET_C", "C condulet", ItemCategory.CONDUIT_BODY, ((_E, _PROPOSED),),
              aliases=("type c condulet",)),
     ItemType("EXPANSION_FITTING", "expansion fitting", ItemCategory.FITTING,
              ((_E, _PROPOSED),), aliases=("expansion coupling",)),
@@ -170,9 +187,15 @@ ITEM_TYPES: tuple[ItemType, ...] = (
              aliases=("smoke det",)),
     ItemType("PULL_STATION", "pull station", ItemCategory.DEVICE, ((_E, _PROPOSED),),
              aliases=("manual pull station",)),
-    # --- HVAC: linear ---
+    # --- HVAC: fabricated duct (by weight) and flex duct (by the foot) ---
+    # Owner-directed: "duct gets taken off by the pound". That lands as
+    # ItemCategory.DUCT -> UnitOfMeasure.POUNDS in vocabulary.py, so this entry
+    # is `LB` without anything here choosing a unit. Flex duct is bought by the
+    # foot off a roll rather than fabricated from sheet, so it is a different
+    # category and stays `LF`; folding it into the weight category would put a
+    # pound figure on a product nobody weighs.
     ItemType("DUCT", "duct", ItemCategory.DUCT, ((_M, _PROPOSED),), aliases=("ductwork",)),
-    ItemType("FLEX_DUCT", "flex duct", ItemCategory.DUCT, ((_M, _PROPOSED),),
+    ItemType("FLEX_DUCT", "flex duct", ItemCategory.DUCT_FLEX, ((_M, _PROPOSED),),
              aliases=("flexible duct",)),
     ItemType("DUCT_LINER", "duct liner", ItemCategory.INSULATION, ((_M, _PROPOSED),),
              aliases=("liner",)),
