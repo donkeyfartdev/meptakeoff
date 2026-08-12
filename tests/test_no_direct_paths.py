@@ -29,6 +29,7 @@ ALLOWED = {
     "db/models.py",
     "schemas.py",
     "bench/make_corpus.py",
+    "bench/run_set.py",   # writes bench/RESULTS.md — the point of the harness
     "bench/__init__.py",
     "store/base.py",   # protocol declaration: `def open(self, key)`
     "store/s3.py",     # same, for the unimplemented S3 backend

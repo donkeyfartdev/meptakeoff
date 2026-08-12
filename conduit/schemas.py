@@ -316,6 +316,7 @@ class SheetRead(Schema):
     thumbnail_object_key: str | None = None
     tile_base_key: str | None = None
     tile_max_zoom: int | None = None
+    paths_object_key: str | None = None
     has_vector_text: bool = True
     ocr_applied: bool = False
     text_span_count: int = 0

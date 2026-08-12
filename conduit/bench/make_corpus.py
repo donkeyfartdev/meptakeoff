@@ -130,35 +130,108 @@ def plan_pages(n_pages: int) -> list[PageSpec]:
 # space PyMuPDF's writer uses. The library under test converts to pdf_points.
 
 
-def _title_block(page: pymupdf.Page, spec: PageSpec, *, rotate: int = 0) -> None:
+#: Title-block bands, measured across the block's SHORT edge, as
+#: ``(near, far, text, fontsize, fontname)``. The long edge is always the
+#: writing direction, so a band never constrains line length.
+TITLE_BLOCK_LONG_PT = 320.0
+TITLE_BLOCK_SHORT_PT = 110.0
+TITLE_BLOCK_RULE_AT_PT = 34.0
+
+
+def _title_block_bands(spec: PageSpec) -> list[tuple[float, float, str, float, str]]:
+    return [
+        (6.0, 32.0, "CONDUIT SYNTHETIC PROJECT\nISSUED FOR BID - NOT A REAL PROJECT", 8, "helv"),
+        (40.0, 80.0, spec.sheet_title, 10, "hebo"),
+        (82.0, 104.0, f"SHEET NUMBER:  {spec.sheet_number}", 12, "hebo"),
+    ]
+
+
+#: ``/Rotate`` -> (page-space corner that ends up bottom-right on screen,
+#: page-space text rotation that reads horizontally on screen). Derived from
+#: the forward transform in ``conduit/geometry.py``; pinned by
+#: ``tests/test_corpus_titleblock.py``, which reads the corpus back through the
+#: backend rather than trusting this comment.
+DISPLAY_BOTTOM_RIGHT: dict[int, tuple[str, int]] = {
+    0: ("br", 0),
+    90: ("tr", 90),
+    180: ("tl", 180),
+    270: ("bl", 270),
+}
+
+
+def _title_block(page: pymupdf.Page, spec: PageSpec, *, extra_rotate: int = 0) -> None:
+    """Draw the title block so it *displays* at the bottom-right of the sheet.
+
+    WHY PLACEMENT FOLLOWS ``/Rotate``
+    ---------------------------------
+    A real title block is bottom-right **as viewed**; the CAD layout is built
+    so that it lands there after ``/Rotate`` is applied. This generator used to
+    draw at the page-space bottom-right regardless of rotation, which put the
+    block at the displayed bottom-left / top-right / top-left on three quarters
+    of the corpus — nowhere near the candidate regions of
+    ``03-pipeline-specs.md`` §1.2. A corpus like that does not test stage B on
+    rotated sheets; it tests stage B's fallback path four times.
+
+    ``extra_rotate=90`` is the separate "content rotated inside an unrotated
+    page" flavour: the block reads sideways *on screen*, which is what §1.6's
+    ``derived_rotation`` case is about.
+
+    WHY THE ROTATED CASE IS BUILT THIS WAY
+    --------------------------------------
+    ``insert_textbox(..., rotate=90)`` writes lines *along the rect's height*
+    and stacks them across its width. Rotating a 320x110 landscape block
+    without also rotating the rect therefore gave each line only 22-40 pt of
+    run before it wrapped — and PyMuPDF wraps mid-token when a word does not
+    fit, so page 7 of the corpus genuinely contained the two spans ``M-1`` and
+    ``02`` instead of ``M-102``. A corpus like that cannot exercise rotated
+    title-block reading, which is precisely what stage B depends on.
+
+    So a rotated block is a rotated *rect*: portrait (110 x 320), with the
+    long edge along the writing direction and each band a strip across the
+    short edge. Line length is then ~304 pt for every band, at every rotation,
+    and every field stays one unbroken token. ``tests/test_corpus_titleblock.py``
+    pins that.
+    """
+    corner, base_rotate = DISPLAY_BOTTOM_RIGHT[spec.rotation % 360]
+    rotate = (base_rotate + extra_rotate) % 360
+    if rotate not in (0, 90, 180, 270):
+        raise ValueError(f"title block rotation must be 0/90/180/270, got {rotate}")
     w, h = page.rect.width, page.rect.height
-    bw, bh = 320.0, 110.0
-    rect = pymupdf.Rect(w - bw - 24, h - bh - 24, w - 24, h - 24)
+    sideways = rotate in (90, 270)
+    bw = TITLE_BLOCK_SHORT_PT if sideways else TITLE_BLOCK_LONG_PT
+    bh = TITLE_BLOCK_LONG_PT if sideways else TITLE_BLOCK_SHORT_PT
+    x0 = 24.0 if corner in ("tl", "bl") else w - bw - 24
+    y0 = 24.0 if corner in ("tl", "tr") else h - bh - 24
+    rect = pymupdf.Rect(x0, y0, x0 + bw, y0 + bh)
     page.draw_rect(rect, color=(0, 0, 0), width=1.5)
-    page.draw_line(
-        pymupdf.Point(rect.x0, rect.y0 + 34), pymupdf.Point(rect.x1, rect.y0 + 34), width=0.8
-    )
-    page.insert_textbox(
-        pymupdf.Rect(rect.x0 + 8, rect.y0 + 6, rect.x1 - 8, rect.y0 + 32),
-        "CONDUIT SYNTHETIC PROJECT\nISSUED FOR BID - NOT A REAL PROJECT",
-        fontsize=8,
-        fontname="helv",
-        rotate=rotate,
-    )
-    page.insert_textbox(
-        pymupdf.Rect(rect.x0 + 8, rect.y0 + 40, rect.x1 - 8, rect.y1 - 30),
-        spec.sheet_title,
-        fontsize=10,
-        fontname="hebo",
-        rotate=rotate,
-    )
-    page.insert_textbox(
-        pymupdf.Rect(rect.x0 + 8, rect.y1 - 28, rect.x1 - 8, rect.y1 - 6),
-        f"SHEET NUMBER:  {spec.sheet_number}",
-        fontsize=12,
-        fontname="hebo",
-        rotate=rotate,
-    )
+    if sideways:
+        page.draw_line(
+            pymupdf.Point(rect.x0 + TITLE_BLOCK_RULE_AT_PT, rect.y0),
+            pymupdf.Point(rect.x0 + TITLE_BLOCK_RULE_AT_PT, rect.y1),
+            width=0.8,
+        )
+    else:
+        page.draw_line(
+            pymupdf.Point(rect.x0, rect.y0 + TITLE_BLOCK_RULE_AT_PT),
+            pymupdf.Point(rect.x1, rect.y0 + TITLE_BLOCK_RULE_AT_PT),
+            width=0.8,
+        )
+
+    for near, far, text, fontsize, fontname in _title_block_bands(spec):
+        if sideways:
+            band = pymupdf.Rect(rect.x0 + near, rect.y0 + 8, rect.x0 + far, rect.y1 - 8)
+        else:
+            band = pymupdf.Rect(rect.x0 + 8, rect.y0 + near, rect.x1 - 8, rect.y0 + far)
+        overflow = page.insert_textbox(
+            band, text, fontsize=fontsize, fontname=fontname, rotate=rotate
+        )
+        if overflow < 0:
+            # Negative return = the text did not fit. Silently truncated input
+            # is how the wrap bug survived; refuse to generate it instead.
+            raise RuntimeError(
+                f"title block band did not fit on page {spec.page_number} "
+                f"(rotate={rotate}, text={text!r}, overflow={overflow})"
+            )
 
 
 def _legend(page: pymupdf.Page) -> None:
@@ -244,9 +317,9 @@ def build(out_path: Path, n_pages: int, *, raster_dpi: int = 50) -> CorpusManife
             page = doc.new_page(width=spec.width_pt, height=spec.height_pt)
             _plan_content(page, spec)
             _legend(page)
-            # One flavour of page gets a rotated title block, because real
-            # title blocks on rotated sheets are often set at 90 degrees.
-            _title_block(page, spec, rotate=90 if spec.page_number % 7 == 0 else 0)
+            # Every 7th page's title block reads sideways on screen, because
+            # plenty of real sheets set the block at 90 degrees.
+            _title_block(page, spec, extra_rotate=90 if spec.page_number % 7 == 0 else 0)
         if spec.rotation:
             page.set_rotation(spec.rotation)
 

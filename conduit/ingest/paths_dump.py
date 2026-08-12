@@ -27,7 +27,15 @@ from conduit.ingest.config import PathsCodec, StageAConfig
 from conduit.pdf.backend import PdfPath
 from conduit.store.base import ObjectRef, ObjectStore
 
-__all__ = ["PATHS_SCHEMA", "available_codec", "dump_paths", "encode_paths", "paths_to_dict"]
+__all__ = [
+    "PATHS_SCHEMA",
+    "available_codec",
+    "decode_paths_blob",
+    "dump_paths",
+    "encode_paths",
+    "load_paths",
+    "paths_to_dict",
+]
 
 PATHS_SCHEMA = "conduit.page_paths/1"
 
@@ -123,3 +131,23 @@ def load_paths(blob: bytes, codec: PathsCodec) -> dict:
     else:
         raw = gzip.decompress(blob)
     return json.loads(raw.decode("utf-8"))
+
+
+#: Magic numbers, so a dump found on its own decodes without being told how.
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def decode_paths_blob(blob: bytes) -> dict:
+    """Decode a stored dump by sniffing its codec.
+
+    Stage B reads these back through ``Sheet.paths_object_key`` and must not
+    have to know which codec the *producing* run used — a fallback from zstd to
+    gzip is a per-run fact (``conduit/PROFILES.md``), and a reader that assumes
+    one of them silently breaks on a mixed store.
+    """
+    if blob.startswith(_ZSTD_MAGIC):
+        return load_paths(blob, "zstd")
+    if blob.startswith(_GZIP_MAGIC):
+        return load_paths(blob, "gzip")
+    raise ValueError("unrecognised paths dump: neither zstd nor gzip magic")

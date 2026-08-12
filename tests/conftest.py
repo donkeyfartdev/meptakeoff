@@ -136,3 +136,31 @@ def ingested(stage_a_env):
     stage_a_env.cfg = cfg
     stage_a_env.peak_live_pixmaps = peak_live_pixmaps()
     return stage_a_env
+
+
+# ---------------------------------------------------------------------------
+# Stage B
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def classified(ingested):
+    """Stage B over the same 8-page run stage A produced. Session-scoped.
+
+    Stage B is cheap (no rendering), but it reads the rows stage A wrote, so it
+    runs against the same database rather than a second ingest.
+    """
+    from conduit.classify import classify_document
+    from conduit.db.models import Document, PipelineRun
+
+    session = ingested.Session()
+    try:
+        document = session.get(Document, ingested.result.document_id)
+        run = session.get(PipelineRun, ingested.result.run_id)
+        result = classify_document(
+            session=session, document=document, run=run, store=ingested.store
+        )
+    finally:
+        session.close()
+    ingested.classify = result
+    return ingested
