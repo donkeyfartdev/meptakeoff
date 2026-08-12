@@ -9,6 +9,7 @@ Read ``docs/output-schema.md`` before changing anything here.
 
 from conduit.materials.sizes import Size, SizeKind, format_inches, parse_size
 from conduit.materials.vocabulary import (
+    DOC_SCOPE,
     ITEM_TYPES,
     MATERIALS,
     VOCABULARY_VERSION,
@@ -17,6 +18,7 @@ from conduit.materials.vocabulary import (
     Material,
     ParsedItemName,
     VocabStatus,
+    aggregation_key,
     default_uom,
     item_key,
     parse_item_name,
@@ -24,9 +26,11 @@ from conduit.materials.vocabulary import (
     render_item_name,
     resolve_item_type,
     resolve_material,
+    sheet_scope,
 )
 
 __all__ = [
+    "DOC_SCOPE",
     "ITEM_TYPES",
     "MATERIALS",
     "VOCABULARY_VERSION",
@@ -37,6 +41,7 @@ __all__ = [
     "Size",
     "SizeKind",
     "VocabStatus",
+    "aggregation_key",
     "default_uom",
     "format_inches",
     "item_key",
@@ -46,4 +51,5 @@ __all__ = [
     "render_item_name",
     "resolve_item_type",
     "resolve_material",
+    "sheet_scope",
 ]

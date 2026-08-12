@@ -34,6 +34,7 @@ from orm import (
     ActorType,
     ClassificationMethod,
     CoordinateSpace,
+    Derivation,
     Discipline,
     EvidenceKind,
     ExportFormat,
@@ -561,7 +562,40 @@ EVIDENCE_KIND_FIELD: dict[EvidenceKind, str] = {
     EvidenceKind.SCHEDULE_ROW: "schedule_row_id",
     EvidenceKind.MEASUREMENT: "measurement_id",
     EvidenceKind.MANUAL: "review_action_id",
+    EvidenceKind.DERIVED_FROM_LINE: "source_takeoff_line_id",
 }
+
+
+#: The derivation words that reach the estimator, in the ``Notes / Location``
+#: column. Kept next to the enum so the label cannot drift from the value.
+DERIVATION_LABEL: dict[Derivation, str] = {
+    Derivation.COUNTED: "counted",
+    Derivation.MEASURED: "measured",
+    Derivation.DERIVED_GEOMETRIC: "derived: geometry",
+    Derivation.FACTORED: "factored",
+    Derivation.MANUAL: "entered by reviewer",
+}
+
+
+def derivation_label(
+    derivation: Derivation,
+    *,
+    factor_rule_id: str | None = None,
+    factor_rule_version: str | None = None,
+) -> str:
+    """The derivation segment of ``Notes / Location``.
+
+    A factored quantity says so, and names the rule, in the column the
+    estimator actually reads — ``factored: hanger_spacing v1``. Presenting a
+    factored number as a counted one is the failure this exists to prevent, so
+    the label is generated from the stored column rather than written by a
+    caller who might forget.
+    """
+    if derivation is not Derivation.FACTORED:
+        return DERIVATION_LABEL[derivation]
+    rule = factor_rule_id or "unnamed rule"
+    version = f" {factor_rule_version}" if factor_rule_version else ""
+    return f"factored: {rule}{version}"
 
 
 class EvidenceRef(Schema):
@@ -574,6 +608,8 @@ class EvidenceRef(Schema):
     schedule_row_id: uuid.UUID | None = None
     measurement_id: uuid.UUID | None = None
     review_action_id: uuid.UUID | None = None
+    #: The line a factored quantity was derived from. The sixth allowed shape.
+    source_takeoff_line_id: uuid.UUID | None = None
     contribution_qty: Decimal = Decimal("0")
     sheet_id: uuid.UUID | None = None
     sheet_number: str | None = None
@@ -593,6 +629,7 @@ class EvidenceRef(Schema):
                 "schedule_row_id",
                 "measurement_id",
                 "review_action_id",
+                "source_takeoff_line_id",
             )
             if getattr(self, f) is not None
         ]
@@ -624,12 +661,18 @@ class TakeoffLineRead(Schema):
     discipline: Discipline
     item_class: str
     description: str | None = None
+    material_code: str | None = None
     size_label: str | None = None
     system_type: SystemType | None = None
     cost_code: str | None = None
     quantity: Quantity
     uom: UnitOfMeasure
     auto_quantity: Decimal | None = None
+    derivation: Derivation = Derivation.COUNTED
+    factor_rule_id: str | None = None
+    factor_rule_version: str | None = None
+    factor_value: Decimal | None = None
+    factor_basis: dict | None = None
     confidence: Confidence = 0.0
     status: ItemStatus = ItemStatus.AUTO
     has_override: bool = False
@@ -645,6 +688,32 @@ class TakeoffLineRead(Schema):
             )
         return self
 
+    @model_validator(mode="after")
+    def _factored_carries_its_factor(self) -> Self:
+        """Mirrors ``ck_line_factored_carries_factor``.
+
+        A factored number that does not carry the rule and version that
+        produced it cannot be re-derived or challenged, which makes it exactly
+        the unauditable number this schema refuses to hold.
+        """
+        if self.derivation is Derivation.FACTORED and not (
+            self.factor_rule_id and self.factor_rule_version and self.factor_value is not None
+        ):
+            raise ValueError(
+                "derivation=factored requires factor_rule_id, factor_rule_version "
+                "and factor_value"
+            )
+        return self
+
+    @property
+    def derivation_note(self) -> str:
+        """What the estimator reads: ``counted``, ``measured``, ``factored: …``."""
+        return derivation_label(
+            self.derivation,
+            factor_rule_id=self.factor_rule_id,
+            factor_rule_version=self.factor_rule_version,
+        )
+
 
 class TakeoffQuery(Schema):
     """Re-query a processed plan set. Never re-runs the pipeline."""
@@ -657,8 +726,10 @@ class TakeoffQuery(Schema):
     statuses: list[ItemStatus] | None = None
     min_confidence: Confidence = 0.0
     include_evidence: bool = False
-    group_by: list[Literal["discipline", "item_class", "size_label", "sheet"]] = Field(
-        default_factory=lambda: ["discipline", "item_class", "size_label"]
+    group_by: list[
+        Literal["discipline", "item_class", "material", "size_label", "sheet"]
+    ] = Field(
+        default_factory=lambda: ["discipline", "item_class", "material", "size_label"]
     )
     limit: int = Field(default=500, ge=1, le=5000)
     offset: int = Field(default=0, ge=0)
@@ -836,6 +907,8 @@ __all__ = [
     "AuditTrail",
     "BBox",
     "Confidence",
+    "DERIVATION_LABEL",
+    "derivation_label",
     "DetectionRead",
     "DocumentCreate",
     "DocumentRead",

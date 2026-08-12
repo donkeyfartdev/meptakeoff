@@ -219,7 +219,15 @@ class SystemType(str, enum.Enum):
     CONDUIT = "conduit"
     CABLE_TRAY = "cable_tray"
     WIRE = "wire"
+    #: Domestic water whose service (hot/cold/recirc) was not determined. Kept
+    #: as the honest "we could not tell" value — never a synonym for cold.
     PIPE_DOMESTIC_WATER = "pipe_domestic_water"
+    PIPE_DOMESTIC_COLD = "pipe_domestic_cold"
+    #: Hot and recirculation are the insulated services. Splitting them out is
+    #: what lets insulation LF be *measured* off the hot runs with real
+    #: provenance instead of factored off a total that mixes hot with cold.
+    PIPE_DOMESTIC_HOT = "pipe_domestic_hot"
+    PIPE_DOMESTIC_RECIRC = "pipe_domestic_recirc"
     PIPE_SANITARY = "pipe_sanitary"
     PIPE_STORM = "pipe_storm"
     PIPE_GAS = "pipe_gas"
@@ -269,6 +277,26 @@ class EvidenceKind(str, enum.Enum):
     SCHEDULE_ROW = "schedule_row"
     MEASUREMENT = "measurement"
     MANUAL = "manual"
+    #: The evidence is another takeoff line: hangers factored off pipe LF,
+    #: insulation factored off hot-water LF. The cited line carries its own
+    #: evidence, so the chain still terminates at a sheet, page and bbox.
+    DERIVED_FROM_LINE = "derived_from_line"
+
+
+class Derivation(str, enum.Enum):
+    """How a line's quantity came to be — the thing the estimator must be told.
+
+    Distinct from ``ItemStatus``, which is a review lifecycle. A number that
+    was factored off another number is not the same claim as one that was
+    counted off a drawing, and presenting the two identically is the quiet
+    kind of wrongness this schema exists to prevent.
+    """
+
+    COUNTED = "counted"                     # discrete evidence, one per unit
+    MEASURED = "measured"                   # polyline length against a scale
+    DERIVED_GEOMETRIC = "derived_geometric"  # inferred from geometry (a vertex)
+    FACTORED = "factored"                   # a rule applied to another quantity
+    MANUAL = "manual"                       # a human typed it
 
 
 class RunStatus(str, enum.Enum):
@@ -1039,8 +1067,14 @@ class TakeoffLine(TimestampMixin, Base):
     Versioned, not mutated: re-aggregation inserts ``revision + 1`` and flips
     ``is_current``, so a ``takeoff_line_id`` in a shipped export always
     resolves. ``aggregation_key`` is the deterministic grouping identity
-    (discipline | item_class | size_label | scope), stable across runs, which
-    is what makes a run-to-run diff a plain SQL join.
+    (discipline | item_class | material | size_label | scope), stable across
+    runs, which is what makes a run-to-run diff a plain SQL join.
+
+    **Material is part of the identity.** Without it a 1/2" copper 90 and a
+    1/2" PVC 90 share one key, sum into one total, and the estimator has no
+    way to see it happened — a wrong number with no visible symptom. The
+    component is ``Material.code``, or ``-`` for an item that genuinely has no
+    material, so the key is always five fields wide.
     """
 
     __tablename__ = "takeoff_line"
@@ -1070,6 +1104,9 @@ class TakeoffLine(TimestampMixin, Base):
     )
     item_class: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    #: ``Material.code`` from ``conduit.materials`` — never free text, and a
+    #: component of ``aggregation_key``. NULL only for items with no material.
+    material_code: Mapped[str | None] = mapped_column(String(64))
     size_label: Mapped[str | None] = mapped_column(String(64))
     system_type: Mapped[SystemType | None] = mapped_column(_enum(SystemType, "system_type_line"))
     cost_code: Mapped[str | None] = mapped_column(String(64))
@@ -1078,6 +1115,29 @@ class TakeoffLine(TimestampMixin, Base):
     uom: Mapped[UnitOfMeasure] = mapped_column(_enum(UnitOfMeasure, "uom_line"), nullable=False)
     #: Quantity before any human override, kept so the export can show both.
     auto_quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+
+    #: How the quantity was arrived at. This is what the export renders as
+    #: "factored", "measured" or "counted" in ``Notes / Location`` — a
+    #: factored number must never reach an estimator dressed as a counted one.
+    #: A column rather than a note, because a reviewer filters on it.
+    derivation: Mapped[Derivation] = mapped_column(
+        _enum(Derivation, "derivation_line"),
+        nullable=False,
+        default=Derivation.COUNTED,
+        server_default=Derivation.COUNTED.value,
+    )
+    #: The rule that produced a factored quantity, and the version of that
+    #: rule. Both queryable: "which lines used hanger_spacing v1" is a
+    #: question a reviewer asks the day a rule turns out to be wrong.
+    factor_rule_id: Mapped[str | None] = mapped_column(String(64))
+    factor_rule_version: Mapped[str | None] = mapped_column(String(32))
+    #: The multiplier actually applied, in the rule's own terms (e.g. 1/7 for
+    #: one hanger per 7 ft). Stored so the arithmetic can be re-checked.
+    factor_value: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    #: The rule's remaining parameters, e.g. ``{"spacing_ft": 7.0,
+    #: "ends_per_run": 2, "source": "project default"}``. Parameters only —
+    #: never the provenance, which is the ``derived_from_line`` evidence row.
+    factor_basis: Mapped[dict | None] = mapped_column(JSONType)
 
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     status: Mapped[ItemStatus] = mapped_column(
@@ -1089,7 +1149,13 @@ class TakeoffLine(TimestampMixin, Base):
     contributing_sheet_numbers: Mapped[list | None] = mapped_column(JSONType)
     notes: Mapped[str | None] = mapped_column(Text)
 
-    evidence: Mapped[list[TakeoffLineEvidence]] = relationship(back_populates="takeoff_line")
+    #: ``foreign_keys`` is explicit because ``takeoff_line_evidence`` now has
+    #: two FKs to this table: the line the evidence belongs to, and (for a
+    #: factored line) the line it was derived from.
+    evidence: Mapped[list[TakeoffLineEvidence]] = relationship(
+        back_populates="takeoff_line",
+        foreign_keys="TakeoffLineEvidence.takeoff_line_id",
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -1110,16 +1176,33 @@ class TakeoffLine(TimestampMixin, Base):
             "evidence_count > 0 OR status = 'manually_added'",
             name="ck_line_requires_evidence",
         ),
+        #: A factored line must carry the factor that produced it and the
+        #: version of the rule, or the number cannot be re-derived or
+        #: challenged. Additive: it constrains only rows that claim to be
+        #: factored, and leaves every other shape exactly as it was.
+        CheckConstraint(
+            "derivation <> 'factored' OR ("
+            "factor_rule_id IS NOT NULL AND factor_rule_version IS NOT NULL "
+            "AND factor_value IS NOT NULL)",
+            name="ck_line_factored_carries_factor",
+        ),
     )
 
 
 class TakeoffLineEvidence(TimestampMixin, Base):
     """Join from an exported quantity to exactly one piece of evidence.
 
-    Exactly one of the five ``*_id`` columns is non-NULL (enforced by
+    Exactly one of the six ``*_id`` columns is non-NULL (enforced by
     ``ck_evidence_exactly_one``); ``evidence_kind`` names which. Typed FKs
     rather than a generic ``(kind, uuid)`` pair so the database, not the
     application, guarantees the provenance link resolves.
+
+    The sixth shape, ``source_takeoff_line_id``, is how a *factored* quantity
+    cites its basis: hangers from pipe LF, insulation from hot-water LF. The
+    allowed set of shapes was widened by exactly one and the "exactly one"
+    rule kept — evidence still cannot be absent, which is the whole point of
+    the constraint. A cited line carries its own evidence, so following the
+    chain still ends at a sheet, a page and a bounding box.
     """
 
     __tablename__ = "takeoff_line_evidence"
@@ -1147,6 +1230,11 @@ class TakeoffLineEvidence(TimestampMixin, Base):
     review_action_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("review_action.id", ondelete="RESTRICT")
     )
+    #: The line this quantity was factored from. RESTRICT, like every other
+    #: evidence FK: you cannot delete the basis out from under a number.
+    source_takeoff_line_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("takeoff_line.id", ondelete="RESTRICT")
+    )
 
     #: How much of the line's quantity this row contributed. Sums to
     #: ``TakeoffLine.auto_quantity`` (pre-override) by construction.
@@ -1168,19 +1256,29 @@ class TakeoffLineEvidence(TimestampMixin, Base):
     extractor_version: Mapped[str | None] = mapped_column(String(64))
     note: Mapped[str | None] = mapped_column(Text)
 
-    takeoff_line: Mapped[TakeoffLine] = relationship(back_populates="evidence")
+    takeoff_line: Mapped[TakeoffLine] = relationship(
+        back_populates="evidence", foreign_keys=[takeoff_line_id]
+    )
 
     __table_args__ = (
         Index("ix_evidence_line", "takeoff_line_id"),
         Index("ix_evidence_detection", "detection_id"),
         Index("ix_evidence_measurement", "measurement_id"),
+        Index("ix_evidence_source_line", "source_takeoff_line_id"),
         CheckConstraint(
             "(CASE WHEN detection_id IS NOT NULL THEN 1 ELSE 0 END) + "
             "(CASE WHEN text_span_id IS NOT NULL THEN 1 ELSE 0 END) + "
             "(CASE WHEN schedule_row_id IS NOT NULL THEN 1 ELSE 0 END) + "
             "(CASE WHEN measurement_id IS NOT NULL THEN 1 ELSE 0 END) + "
-            "(CASE WHEN review_action_id IS NOT NULL THEN 1 ELSE 0 END) = 1",
+            "(CASE WHEN review_action_id IS NOT NULL THEN 1 ELSE 0 END) + "
+            "(CASE WHEN source_takeoff_line_id IS NOT NULL THEN 1 ELSE 0 END) = 1",
             name="ck_evidence_exactly_one",
+        ),
+        #: A line may not be its own evidence. Cheap to state, and the one
+        #: self-citation a factoring bug would produce.
+        CheckConstraint(
+            "source_takeoff_line_id IS NULL OR source_takeoff_line_id <> takeoff_line_id",
+            name="ck_evidence_no_self_basis",
         ),
     )
 
@@ -1375,6 +1473,7 @@ __all__ = [
     "ActorType",
     "ClassificationMethod",
     "CoordinateSpace",
+    "Derivation",
     "Discipline",
     "EvidenceKind",
     "ExportFormat",
